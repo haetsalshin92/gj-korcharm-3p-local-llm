@@ -11,9 +11,13 @@ from datetime import datetime
 load_dotenv()
 
 # MongoDB 연결
-mongo_client = MongoClient("mongodb://localhost:27017/")
-db = mongo_client["chatdb"]
-collection = db["conversations"]
+mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017/")
+mongo_db = os.getenv("MONGODB_DB", "chatdb")
+mongo_collection = os.getenv("MONGODB_COLLECTION", "conversations")
+
+mongo_client = MongoClient(mongo_uri)
+db = mongo_client[mongo_db]
+collection = db[mongo_collection]
 
 # LM Studio API 정보
 lm_studio_url = os.getenv("LM_STUDIO_URL", "http://localhost:1234/v1/chat/completions")
@@ -26,21 +30,19 @@ def is_valid_objectid(oid):
     except (InvalidId, TypeError):
         return False
 
+
 def run_question_ui():
     st.set_page_config(page_title='LM Studio Chat', page_icon='🤖')
-    st.title("🧠 LM Studio 대화형 AI")
+    st.markdown(
+        "<h1 style='text-align: center;'>🧠 LM Studio 대화형 AI</h1>",
+        unsafe_allow_html=True
+    )
 
     # 쿼리 파라미터 읽기
     query_params = st.query_params
-
     selected_id = None
     if "convo" in query_params and query_params["convo"]:
-
-        print(f"디버그: query_params['convo']의 전체 값: {query_params['convo']}")
-        print(f"디버그: query_params['convo']의 타입: {type(query_params['convo'])}")
-
         candidate = query_params["convo"]
-        print(f"디버그: candidate: {candidate}")
         if is_valid_objectid(candidate):
             selected_id = candidate
         else:
@@ -56,21 +58,27 @@ def run_question_ui():
 
     st.sidebar.header("💬 대화 목록")
 
-    # 새 채팅 시작 버튼
     if st.sidebar.button("➕ 새 채팅 시작"):
-        st.query_params = {}  # 쿼리 파라미터 초기화
+        st.query_params = {}
         st.session_state.selected_convo_id = None
-        st.rerun()  # rerun 대신 페이지가 리로드되므로 없어도 되지만 안전하게 호출
+        st.rerun()
 
-    # 대화 목록 출력 (버튼)
+    # 대화 목록 출력
     convos = list(collection.find().sort("created_at", -1))
     for convo in convos:
         display_title = convo.get("title") or "(제목 없음)"
-        if st.sidebar.button(display_title, key=str(convo["_id"])):
-            st.query_params = {"convo": str(convo["_id"])}
+        convo_id_str = str(convo["_id"])
+        is_selected = convo_id_str == st.session_state.selected_convo_id
+        label = f"✅ {display_title}" if is_selected else display_title
+
+        if st.sidebar.button(label, key=convo_id_str):
+            st.query_params = {"convo": convo_id_str}
             st.rerun()
 
-    # 선택된 대화 보여주기 및 메시지 입력 처리
+    # 🔻 공통 입력창 (한 번만 정의)
+    user_input = st.chat_input("메시지를 입력하세요", key="unique_chat_input")
+
+    # ✅ 기존 대화 선택된 경우
     if st.session_state.selected_convo_id:
         convo = collection.find_one({"_id": ObjectId(st.session_state.selected_convo_id)})
         if convo is None:
@@ -80,12 +88,10 @@ def run_question_ui():
             st.rerun()
             return
 
-        st.subheader(f"💬 {convo['title']}")
         for msg in convo.get("messages", []):
             with st.chat_message(msg["role"], avatar="🌀" if msg["role"] == "user" else "🤖"):
                 st.markdown(msg["content"])
 
-        user_input = st.chat_input("메시지를 입력하세요")
         if user_input:
             user_msg = {"role": "user", "content": user_input, "timestamp": datetime.utcnow()}
             collection.update_one(
@@ -121,11 +127,10 @@ def run_question_ui():
             st.query_params = {"convo": st.session_state.selected_convo_id}
             st.rerun()
 
+    # 🆕 새 대화 시작
     else:
-        st.subheader("➕ 새 채팅을 시작하려면 질문을 입력하세요")
-        user_input = st.chat_input("메시지를 입력하세요")
+        st.subheader("➕ 새 채팅을 시작하려면 메시지를 입력하세요")
         if user_input:
-            # 1. 신규 대화 생성 및 사용자 메시지 저장
             convo_doc = {
                 "title": user_input[:50],
                 "model": model,
@@ -138,7 +143,6 @@ def run_question_ui():
             new_id = str(result.inserted_id)
             st.session_state.selected_convo_id = new_id
 
-            # 2. LLM API 호출
             answer = ""
             with st.spinner("⏳ 답변 생성 중..."):
                 try:
@@ -158,16 +162,15 @@ def run_question_ui():
                     answer = f"❌ 오류 발생: {e}"
                     st.error(answer)
 
-            # 3. 어시스턴트 답변 DB 저장
             assistant_msg = {"role": "assistant", "content": answer, "timestamp": datetime.utcnow()}
             collection.update_one(
                 {"_id": ObjectId(new_id)},
                 {"$push": {"messages": assistant_msg}}
             )
 
-            # 4. 쿼리 파라미터에 대화 ID 유지, 리런
             st.query_params = {"convo": new_id}
             st.rerun()
+
 
 if __name__ == "__main__":
     run_question_ui()
